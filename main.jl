@@ -8,13 +8,33 @@ using SparseArrays
 
 
 # note that the graphene indices swap roles on the second layer (should only need to worry about this in geometry construction)
-# need to double check that the thresh_connections are being determined corretly
 
 # ===============================================================================
 # Geometry
 # ===============================================================================
 
-# NOTE: maybe I could also calculate the position vector at runtime and store it here to save speed for memory
+
+"""Geometry and stored in a common place"""
+struct TBGGeometry
+    d::Float64
+    h::Float64 
+    mn::SVector{2, Int}
+    graphene_cells::Dict{Int, Vector{SVector{2, Int}}}
+    θ::Float64
+    a1_down::SVector{3, Float64}
+    a1_up::SVector{3, Float64} 
+    a2_down::SVector{3, Float64} 
+    a2_up::SVector{3, Float64} 
+    b1_down::SVector{3, Float64} 
+    b1_up::SVector{3, Float64} 
+    b2_down::SVector{3, Float64} 
+    b2_up::SVector{3, Float64} 
+    L1::SVector{3, Float64}
+    L2::SVector{3, Float64}
+end
+
+
+# Using this as an intermediate in generating TBGConstants or for conveniently plotting lattice 
 """Label the sites in tbg with 5 dimentional multi-indices (position calculated by constructor)"""
 struct SiteIdx         
     moire::SVector{2, Int}
@@ -26,40 +46,20 @@ struct SiteIdx
 end
 
 
-"""Using this for the thresh_connections values (relative moire-graphene-index)"""
-struct RelativeIdx
-    rel_moire::SVector{2, Int}
-    graphene::SVector{2, Int}
-    layer::Int
-end
-
-
-"""Geometry and energy constants stored in a common place"""
+"""Other Constants stored in a common place"""
 struct TBGConstants
-    d::Float64
-    h::Float64 
-    mn::SVector{2, Int}
-    graphene_cells::Dict{Int, Vector{SVector{2, Int}}}
-    θ::Float64
     t0::Float64 
     t1::Float64 
     q_sigma::Float64 
     q_pi::Float64
     r_c::Float64 
     l_c::Float64
-    a1_down::SVector{3, Float64}
-    a1_up::SVector{3, Float64} 
-    a2_down::SVector{3, Float64} 
-    a2_up::SVector{3, Float64} 
-    b1_down::SVector{3, Float64} 
-    b1_up::SVector{3, Float64} 
-    b2_down::SVector{3, Float64} 
-    b2_up::SVector{3, Float64} 
-    L1::SVector{3, Float64}
-    L2::SVector{3, Float64}
     r_thresh::Float64 
     n_thresh::Int                 
-    thresh_connections::Dict{RelativeIdx, Vector{RelativeIdx}}
+    thresh_connections::Dict{SiteIdx, Vector{SiteIdx}}    # remove this (or keep it b/c its more general than matrix indices) 
+    # would also need to specify N1, N2 in order to get the set below (should be fine)
+    # add a set of pairs of matrix idxs that are connected by threshold 
+    # add a dictionary mapping pairs in the set above to their difference vector (r(a)-r(b)) for constructing hamiltonian
 end
 
 
@@ -104,80 +104,6 @@ function get_twist_angle(mn::SVector{2, Int})::Float64
 end
 
 
-function get_n_thresh(r_thresh::Float64, L1::SVector{3, Float64}, L2::SVector{3, Float64})::Int
-    n_thresh = ceil(r_thresh / min(norm(L1), norm(L2)))
-    return n_thresh
-end
-
-
-"""
-Converts from site indices to real space position vector using tbg geometry.
-Meant to be only used by the TBGConstants as it is in the process 
-of building the TBGConstants object.
-"""
-function get_position_tmp(site_idx::RelativeIdx, L1::SVector{3, Float64}, L2::SVector{3, Float64}, 
-                          a1::SVector{3, Float64}, a2::SVector{3, Float64}, h::Float64)::SVector{3, Float64}
-    # building the position vector
-    position_vector = site_idx.rel_moire[1] * L1 + site_idx.rel_moire[2] * L2 
-    position_vector += site_idx.graphene[1] * a1 + site_idx.graphene[2] * a2
-
-    if site_idx.layer == 2
-        position_vector += [0, 0, h]
-    end
-
-    return position_vector
-end
-
-
-"""
-Get the connection dictionary for each site in a moire cell (sites connected 
-    within the distance threshold). Note that they include themselves in the count.
-"""
-function get_thresh_connections(r_thresh::Float64, n_thresh::Int,
-                                graphene_cells::Dict{Int, Vector{SVector{2, Int}}},
-                                L1::SVector{3, Float64}, L2::SVector{3, Float64}, 
-                                a1_down::SVector{3, Float64}, a2_down::SVector{3, Float64}, 
-                                a1_up::SVector{3, Float64}, a2_up::SVector{3, Float64},
-                                h::Float64)::Dict{RelativeIdx, Vector{RelativeIdx}}
-    thresh_connections = Dict()
-    
-    # first looping through the origin graphene cells (keys) 
-    for layer_orig in 1:2
-        a1_o, a2_o = (layer_orig == 1) ? (a1_down, a2_down) : (a1_up, a2_up)
-
-        for g_orig in graphene_cells[layer_orig]
-            orig_site = RelativeIdx((0, 0), g_orig, layer_orig)
-            connected_sites = Vector()
-            
-            # then looping though all the cells in within the moire cells in the threshold (values)
-            for rel_moire_1 in (-2 * n_thresh):(2 * n_thresh), rel_moire_2 in (-2 * n_thresh):(2 * n_thresh)
-                rel_moire = (rel_moire_1, rel_moire_2)
-
-                for layer_compare in 1:2
-                    a1_c, a2_c = (layer_compare == 1) ? (a1_down, a2_down) : (a1_up, a2_up)
-
-                    for g_compare in graphene_cells[layer_compare]
-                        compare_site = RelativeIdx(rel_moire, g_compare, layer_compare)
-                        pos_orig = get_position_tmp(orig_site, L1, L2, a1_o, a2_o, h)
-                        pos_compare = get_position_tmp(compare_site, L1, L2, a1_c, a2_c, h)
-                        r_separation = norm(pos_orig - pos_compare)
-
-                        # if the comparison site falls within threshold, add it to the connected sites vector
-                        if r_separation < r_thresh 
-                            push!(connected_sites, compare_site)
-                        end
-                    end 
-                end
-            end
-            
-            thresh_connections[orig_site] = connected_sites
-        end
-    end
-
-    return thresh_connections
-end
-
-
 function rot_matrix_xy(θ::Float64)::Matrix{Float64}
     R_θ = [cos(θ) -sin(θ) 0;
            sin(θ) cos(θ) 0;
@@ -186,22 +112,15 @@ function rot_matrix_xy(θ::Float64)::Matrix{Float64}
 end
 
 
-"""constructor for the TBGConstants object"""
-function TBGConstants(m::Int, n::Int)::TBGConstants
+"""constructor for the TBGGeometry object"""
+function TBGGeometry(m::Int, n::Int)::TBGGeometry
     0 < m < n || throw(ArgumentError("require 0 < m < n"))
-    println("Beginning construction of TBGConstants")
 
     d = 1.42
     h = 3.34
     mn = SVector{2}(m, n)
     graphene_cells = get_graphene_cells(mn)
     θ = get_twist_angle(mn)
-    t0 = 2.7
-    t1 = 0.48
-    q_sigma = 7.41
-    q_pi = 3.15
-    r_c = 5.0
-    l_c = 0.265
     a1_down = SVector{3}((d*sqrt(3)) * [1, 0, 0])
     a1_up = SVector{3}(rot_matrix_xy(-θ) * a1_down)
     a2_down = SVector{3}((d*sqrt(3)) * [1/2, sqrt(3)/2, 0])
@@ -212,35 +131,29 @@ function TBGConstants(m::Int, n::Int)::TBGConstants
     b2_up = SVector{3}(rot_matrix_xy(-θ) * b2_down)
     L1 = SVector{3}(n * a1_down + m * a2_down)
     L2 = SVector{3}(-m * a1_down + (n + m) * a2_down)
-    r_thresh = 7.0                                  # need to think carefully about this value
-    n_thresh = get_n_thresh(r_thresh, L1, L2)       # number of moire cells within proximity (in L1/L2 directions, for a total of 4n^2 + 4n + 1)
-    thresh_connections = get_thresh_connections(r_thresh, n_thresh, graphene_cells, L1, L2, 
-                                                a1_down, a2_down, a1_up, a2_up, h)
 
-    println("Finished construction of TBGConstants")
-    return TBGConstants(d, h, mn, graphene_cells, θ, t0, t1, q_sigma, q_pi, r_c, 
-                        l_c, a1_down,a1_up, a2_down, a2_up, b1_down, b1_up, b2_down, 
-                        b2_up, L1, L2, r_thresh, n_thresh, thresh_connections)    # goodness gracious                
+    return TBGGeometry(d, h, mn, graphene_cells, θ, a1_down,a1_up, a2_down, a2_up, b1_down, b1_up, b2_down, 
+                        b2_up, L1, L2)            
 end
 
 
 """Converts from site indices to real space position vector using tbg geometry"""
 function get_position(moire::SVector{2, Int}, graphene::SVector{2, Int}, sublattice::Int,
-                      layer::Int, tbg_csts::TBGConstants)::SVector{3, Float64}
-    h = tbg_csts.h
-    L1 = tbg_csts.L1
-    L2 = tbg_csts.L2
+                      layer::Int, tbg_geom::TBGGeometry)::SVector{3, Float64}
+    h = tbg_geom.h
+    L1 = tbg_geom.L1
+    L2 = tbg_geom.L2
 
     if layer == 1
-        a1 = tbg_csts.a1_up
-        a2 = tbg_csts.a2_up
-        b1 = tbg_csts.b1_up
-        b2 = tbg_csts.b2_up
+        a1 = tbg_geom.a1_down
+        a2 = tbg_geom.a2_down
+        b1 = tbg_geom.b1_down
+        b2 = tbg_geom.b2_down
     else
-        a1 = tbg_csts.a1_down
-        a2 = tbg_csts.a2_down
-        b1 = tbg_csts.b1_down
-        b2 = tbg_csts.b2_down
+        a1 = tbg_geom.a1_up
+        a2 = tbg_geom.a2_up
+        b1 = tbg_geom.b1_up
+        b2 = tbg_geom.b2_up
     end
 
     # building the position vector
@@ -260,12 +173,83 @@ function get_position(moire::SVector{2, Int}, graphene::SVector{2, Int}, sublatt
 end
 
 
-# NOTE: I should also add some kind of wrapping function (mod lattice) to keep graphene idxs within the allowed range
 """Constructor for the SiteIdx object"""
 function SiteIdx(moire::SVector{2, Int}, graphene::SVector{2, Int}, sublattice::Int,
-                 layer::Int, spin::Int, tbg_csts::TBGConstants)::SiteIdx
-    pos = get_position(moire, graphene, sublattice, layer, tbg_csts)
+                 layer::Int, spin::Int, tbg_geom::TBGGeometry)::SiteIdx
+    pos = get_position(moire, graphene, sublattice, layer, tbg_geom)
     return SiteIdx(moire, graphene, sublattice, layer, spin, pos)
+end
+
+
+function get_n_thresh(r_thresh::Float64, geom::TBGGeometry)::Int
+    n_thresh = ceil(r_thresh / min(norm(geom.L1), norm(geom.L2)))
+    return n_thresh
+end
+
+
+"""
+Get the connection dictionary for each site in a moire cell (sites connected 
+within the distance threshold). Note that they include themselves in the count.
+Also, for all keys, the moire coordinate is set to (0,0) and spin = +1.
+"""
+function get_thresh_connections(r_thresh::Float64, n_thresh::Int,
+                                geom::TBGGeometry)::Dict{SiteIdx, Vector{SiteIdx}}
+    thresh_connections = Dict()
+    
+    # first looping through the origin graphene cells (keys) 
+    for layer_orig in 1:2
+
+        for g_orig in geom.graphene_cells[layer_orig]
+
+            for sublattice_orig in 1:2
+                orig_site = SiteIdx(SVector{2}(0, 0), g_orig, sublattice_orig, layer_orig, 1, geom)
+                connected_sites = Vector()
+                
+                # then looping though all the cells in within the moire cells in the threshold (values)
+                for moire_compare_1 in (-2 * n_thresh):(2 * n_thresh), moire_compare_2 in (-2 * n_thresh):(2 * n_thresh)
+                    moire_compare = SVector{2}(moire_compare_1, moire_compare_2)
+
+                    for layer_compare in 1:2
+
+                        for g_compare in geom.graphene_cells[layer_compare]
+
+                            for sublattice_compare in 1:2
+                                compare_site = SiteIdx(moire_compare, g_compare, sublattice_compare, layer_compare, 1, geom)
+                                r_separation = norm(orig_site.pos - compare_site.pos)
+
+                                # if the comparison site falls within threshold, add it to the connected sites vector
+                                if r_separation < r_thresh 
+                                    push!(connected_sites, compare_site)
+                                end
+                            end
+                        end 
+                    end
+                end
+
+            thresh_connections[orig_site] = connected_sites
+            end
+        end
+    end
+
+    return thresh_connections
+end
+
+
+"""constructor for the TBGConstants object"""
+function TBGConstants(geom::TBGGeometry)::TBGConstants
+
+    t0 = 2.7
+    t1 = 0.48
+    q_sigma = 7.41
+    q_pi = 3.15
+    r_c = 5.0
+    l_c = 0.265
+    r_thresh = 15.0                                  # need to think carefully about this value
+    n_thresh = get_n_thresh(r_thresh, geom)       # number of moire cells within proximity (in L1/L2 directions, for a total of 4n^2 + 4n + 1)
+    thresh_connections = get_thresh_connections(r_thresh, n_thresh, geom)
+
+    return TBGConstants(t0, t1, q_sigma, q_pi, r_c, l_c, 
+                        r_thresh, n_thresh, thresh_connections)               
 end
 
 
@@ -288,16 +272,16 @@ benchmarking tools and reminders:
 
 
 """Plot the moire superlattice unit cell"""
-function plot_cells(m::Int, n::Int)
-    tbg_csts = TBGConstants(m, n)
+function plot_cells(m::Int, n::Int)::Nothing
+    tbg_geom = TBGGeometry(m, n)
 
     lattice_sites = []
     for layer in 1:2
         for moire_x in 1:5, moire_y in 1:5
             moire = SVector{2}(moire_x, moire_y)
-            for graphene in tbg_csts.graphene_cells[layer]
+            for graphene in tbg_geom.graphene_cells[layer]
                 for sublattice in 1:2
-                    site_idx = SiteIdx(moire, graphene, sublattice, layer, 1, tbg_csts)
+                    site_idx = SiteIdx(moire, graphene, sublattice, layer, 1, tbg_geom)
                     site_pos = site_idx.pos
                     push!(lattice_sites, site_pos)
                 end
@@ -312,13 +296,13 @@ function plot_cells(m::Int, n::Int)
     ax.scatter(xs, ys, marker=".", alpha=0.5)
 
     ax.set_aspect("equal")
-    ax.set_title("θ = $(tbg_csts.θ * (180 / pi))")
+    ax.set_title("θ = $(tbg_geom.θ * (180 / pi))")
 
     plt.show()
 end
 
 
-function plot_thresh_sites(orig_site::SiteIdx, tbg_csts::TBGConstants)
+function plot_thresh_sites(orig_site::SiteIdx, tbg_geom::TBGGeometry, tbg_consts::TBGConstants)::Nothing
     fig, ax = plt.subplots()
 
     # =================================================================
@@ -328,9 +312,9 @@ function plot_thresh_sites(orig_site::SiteIdx, tbg_csts::TBGConstants)
     for layer in 1:2
         for moire_x in -1:1, moire_y in -1:1
             moire = SVector{2}(moire_x, moire_y)
-            for graphene in tbg_csts.graphene_cells[layer]
+            for graphene in tbg_geom.graphene_cells[layer]
                 for sublattice in 1:2
-                    site_idx = SiteIdx(moire, graphene, sublattice, layer, 1, tbg_csts)
+                    site_idx = SiteIdx(moire, graphene, sublattice, layer, 1, tbg_geom)
                     site_pos = site_idx.pos
                     push!(lattice_sites, site_pos)
                 end
@@ -346,16 +330,11 @@ function plot_thresh_sites(orig_site::SiteIdx, tbg_csts::TBGConstants)
     # =================================================================
 
     # convert orig_site from SiteIdx to RelativeIdx object
-    orig_site_r = RelativeIdx(orig_site.moire, orig_site.graphene, orig_site.layer)
-    connected_sites = tbg_csts.thresh_connections[orig_site_r]
+    connected_sites = tbg_consts.thresh_connections[orig_site]
     
     connected_sites_pos = []
-    for other_site_r in connected_sites
-        for sublattice in 1:2
-            other_site = SiteIdx(other_site_r.rel_moire, other_site_r.graphene, sublattice, 
-                                 other_site_r.layer, 1, tbg_csts)
-            push!(connected_sites_pos, other_site.pos)
-        end
+    for other_site in connected_sites
+        push!(connected_sites_pos, other_site.pos)
     end
 
     xs = [v[1] for v in connected_sites_pos]
@@ -366,7 +345,7 @@ function plot_thresh_sites(orig_site::SiteIdx, tbg_csts::TBGConstants)
     ax.scatter(orig_site.pos[1], orig_site.pos[2], marker="o")
 
     ax.set_aspect("equal")
-    ax.set_title("θ = $(tbg_csts.θ * (180 / pi)), N_thresh_sites = $(size(connected_sites_pos)[1])")
+    ax.set_title("θ = $(tbg_geom.θ * (180 / pi)), N_thresh_sites = $(size(connected_sites_pos)[1])")
 
     plt.show()
 end
@@ -378,10 +357,12 @@ end
 
 
 function main()
+    println("=============== STARTING MAIN ===============")
     m, n = (8, 9)
-    tbg_csts = TBGConstants(m, n)
-    orig_site = SiteIdx(SVector(0, 0), SVector(4, 6), 1, 1, 1, tbg_csts)
-    @time plot_thresh_sites(orig_site, tbg_csts)
+    tbg_geom = TBGGeometry(m, n)
+    @time tbg_consts = TBGConstants(tbg_geom)
+    orig_site = SiteIdx(SVector(0, 0), SVector(0, 0), 1, 1, 1, tbg_geom)
+    plot_thresh_sites(orig_site, tbg_geom, tbg_consts)
 end
 
 
